@@ -8,6 +8,7 @@
 # ========================== #
 # ===  Made by "lonely"  === #
 # ========================== #
+# ====  Version  1.0.1  ==== #
 
 
 import requests
@@ -28,8 +29,7 @@ THREAD_COUNT = 3  # number of parallel cracking threads, adjust for your hardwar
 CRACKER_ID = str(uuid.uuid4())
 USERKEY = "SET USER KEY" # important: add your user key 
 
-
-# === Terminal Colors for Readability ===
+# === Terminal Colors for readability ===
 class TerminalColors:
     RED = '\033[31m'
     GREEN = '\033[32m'
@@ -39,7 +39,7 @@ class TerminalColors:
 
 
 def log(message, color=TerminalColors.RESET):
-    """Print message with timestamp and color."""
+    """Print a message with timestamp and color."""
     print(f"{time.strftime('[%H:%M:%S]')} - {color}{message}{TerminalColors.RESET}")
 
 
@@ -70,14 +70,58 @@ def download_file(url, filename):
 def submit_results(file_name, potfile_content):
     """Submit cracked results back to the server."""
     try:
+        log(f"Submitting results for {file_name}", TerminalColors.GREEN)
         response = requests.post(f"{SERVER_URL}/put_work", json={
             "file_name": file_name,
             "potfile_content": potfile_content
         }, timeout=10)
+        log(f"Response status code: {response.status_code}", TerminalColors.GREEN)
         return response.status_code == 200
     except Exception as e:
         log(f"Error submitting results: {e}", TerminalColors.RED)
         return False
+
+
+def send_hashrate(file_name, hashrate):
+    """Send hashrate updates to server for leaderboard tracking."""
+    try:
+        response = requests.post(f"{SERVER_URL}/update_hashrate", json={
+            "file_name": file_name,
+            "hashrate": hashrate,
+            "cracker_id": CRACKER_ID,
+            "user_key": USERKEY
+        }, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        log(f"Error sending hashrate: {e}", TerminalColors.RED)
+        return False
+
+
+def parse_hashrate_from_line(line):
+    """Parse hashrate from Hashcat output line."""
+    hashrate = 0
+    try:
+        if line.startswith("Speed.#"):
+            parts = line.split(':')
+            if len(parts) > 1:
+                rate_str = parts[1].strip().split(' ')[0]
+                unit = parts[1].strip().split(' ')[1] if len(parts[1].strip().split(' ')) > 1 else ''
+                try:
+                    rate = float(rate_str)
+                    if unit == 'kH/s':
+                        rate *= 1e3
+                    elif unit == 'MH/s':
+                        rate *= 1e6
+                    elif unit == 'GH/s':
+                        rate *= 1e9
+                    elif unit == 'TH/s':
+                        rate *= 1e12
+                    hashrate = rate
+                except ValueError:
+                    pass
+    except Exception:
+        pass
+    return hashrate
 
 
 # === Hashcat Execution ===
@@ -87,6 +131,7 @@ def crack_file(file_name):
     Returns cracked content if found.
     """
     output_file = f"{file_name}.potfile"
+    start_time = time.time()
 
     # Optimized Hashcat command
     command = [
@@ -106,16 +151,27 @@ def crack_file(file_name):
     try:
         process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         found_passwords = set()
+        last_hashrate_update = time.time()
 
         # Real-time Hashcat output monitor
         for line in iter(process.stdout.readline, ''):
             line = line.strip()
             if "Speed.#" in line:
                 log(line, TerminalColors.ORANGE)
+                # Send hashrate updates every 5 seconds
+                current_time = time.time()
+                if current_time - last_hashrate_update >= 5:
+                    hashrate = parse_hashrate_from_line(line)
+                    if hashrate > 0:
+                        send_hashrate(file_name, hashrate)
+                        last_hashrate_update = current_time
             elif "Recovered" in line or "Cracked" in line:
                 log(line, TerminalColors.GREEN)
 
         process.wait()
+        end_time = time.time()
+        processing_time = end_time - start_time
+        log(f"Processing time for {file_name}: {processing_time:.2f} seconds", TerminalColors.PURPLE)
 
         # Check for results
         if os.path.exists(output_file):
@@ -148,7 +204,7 @@ def crack_file(file_name):
 
 # === Worker Thread Function ===
 def worker(task_queue):
-    """Processes a file from the work queue in a separate thread. this allows a better usage of ressources"""
+    """Processes a file from the work queue in a separate thread."""
     while True:
         work = task_queue.get()
         if work is None:
@@ -161,6 +217,10 @@ def worker(task_queue):
             if result:
                 if submit_results(file_name, result):
                     log(f"Result uploaded for {file_name}", TerminalColors.PURPLE)
+                else:
+                    log(f"Failed to submit results for {file_name}", TerminalColors.RED)
+            else:
+                log(f"No results found for {file_name}", TerminalColors.RED)
         else:
             log(f"Failed to download {file_name}", TerminalColors.RED)
         task_queue.task_done()
@@ -183,8 +243,8 @@ def main():
                 task_queue.put(work)
                 log(f"New job queued: {work['file_name']}", TerminalColors.GREEN)
             else:
-                log("No new work available - retrying in 30s...", TerminalColors.RED)
-                time.sleep(30)
+                log("No new work available - retrying in 60s...", TerminalColors.RED)
+                time.sleep(60)
     except KeyboardInterrupt:
         log("Keyboard interrupt received. Shutting down threads...", TerminalColors.RED)
     finally:
@@ -192,6 +252,7 @@ def main():
             task_queue.put(None)
         task_queue.join()
         log("All threads finished and PwnCrack stopped gracefully.", TerminalColors.ORANGE)
+        print("\nThank you for using and contributing to PwnCrack!")
 
 
 if __name__ == "__main__":
